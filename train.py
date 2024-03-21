@@ -189,7 +189,10 @@ def train(hyp, opt, device, callbacks):
         model = Model(cfg or ckpt["model"].yaml, ch=3, nc=nc, anchors=hyp.get("anchors")).to(device)  # create
         exclude = ["anchor"] if (cfg or hyp.get("anchors")) and not resume else []  # exclude keys
         csd = ckpt["model"].float().state_dict()  # checkpoint state_dict as FP32
-        csd = intersect_dicts(csd, model.state_dict(), exclude=exclude)  # intersect
+        if not resume:
+            csd = intersect_dicts(csd, model.state_dict(), exclude=exclude, extra=opt.extra_layer, remove=opt.remove_layer)  # intersect
+        else:
+            csd = intersect_dicts(csd, model.state_dict(), exclude=exclude)
         model.load_state_dict(csd, strict=False)  # load
         LOGGER.info(f"Transferred {len(csd)}/{len(model.state_dict())} items from {weights}")  # report
     else:
@@ -268,6 +271,8 @@ def train(hyp, opt, device, callbacks):
         prefix=colorstr("train: "),
         shuffle=True,
         seed=opt.seed,
+        channels=opt.channels,
+        rect_size=opt.rect_size,
     )
     labels = np.concatenate(dataset.labels, 0)
     mlc = int(labels[:, 0].max())  # max label class
@@ -435,6 +440,8 @@ def train(hyp, opt, device, callbacks):
                     plots=False,
                     callbacks=callbacks,
                     compute_loss=compute_loss,
+                    channels=opt.channels,
+                    rect_size=opt.rect_size,
                 )
 
             # Update best mAP
@@ -500,6 +507,8 @@ def train(hyp, opt, device, callbacks):
                         plots=plots,
                         callbacks=callbacks,
                         compute_loss=compute_loss,
+                        channels=opt.channels,
+                        rect_size=opt.rect_size,
                     )  # val best model with plots
                     if is_coco:
                         callbacks.run("on_fit_epoch_end", list(mloss) + list(results) + lr, epoch, best_fitness, fi)
@@ -551,6 +560,10 @@ def parse_opt(known=False):
     parser.add_argument("--save-period", type=int, default=-1, help="Save checkpoint every x epochs (disabled if < 1)")
     parser.add_argument("--seed", type=int, default=0, help="Global training seed")
     parser.add_argument("--local_rank", type=int, default=-1, help="Automatic DDP Multi-GPU argument, do not modify")
+    parser.add_argument("--channels", type=int, default=3, help="number of input image channels")
+    parser.add_argument("--rect_size", nargs="+", type=int, default=None, help="input image size (h/w)")
+    parser.add_argument('--extra_layer', type=int, nargs='+', default=[], help='extra layer added in yaml configuration')
+    parser.add_argument('--remove_layer', type=int, nargs='+', default=[], help='remove layer in pre-train yaml configuration')
 
     # Logger arguments
     parser.add_argument("--entity", default=None, help="Entity")

@@ -290,12 +290,51 @@ def init_seeds(seed=0, deterministic=False):
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
         os.environ["PYTHONHASHSEED"] = str(seed)
 
+def intersect_dicts(da, db, exclude=(), extra=[], remove=[]):
+    # Dictionary intersection of matching keys and shapes, omitting 'exclude' keys, using da values
+    '''
+    :param da: 预加载模型中参数信息
+    :param db: 模型中的参数信息
+    :param exclude: 需要过滤的模块名称
+    :param extra: 额外添加的自建模块所在的层数:
+    :param remove: 从预训练模型中移除的模块层数
+    '''
+    if len(extra) == 0 and len(remove) == 0:
+        return {k: v for k, v in da.items() if k in db and all(x not in k for x in exclude) and v.shape == db[k].shape}
+    else:
+        result = dict()
+        for k, v in da.items():
+            if(k[7] != '.'):        # example k: model.0.conv.weight
+                layer = int(k[6:8])
+            else:
+                layer = int(k[6])
 
-def intersect_dicts(da, db, exclude=()):
-    """Returns intersection of `da` and `db` dicts with matching keys and shapes, excluding `exclude` keys; uses `da`
-    values.
-    """
-    return {k: v for k, v in da.items() if k in db and all(x not in k for x in exclude) and v.shape == db[k].shape}
+            for i in extra:
+                if layer >= i:
+                    layer += 1
+            if layer in remove:
+                continue
+
+            remove_num = 0
+            for i in remove:
+                if layer > i:
+                    remove_num += 1
+            layer -= remove_num
+
+            if(k[7] != '.'):
+                k = k[:6] + str(layer) + k[8:]
+            else:
+                k = k[:6] + str(layer) + k[7:]
+
+            if not any(x in k for x in exclude) and v.shape == db[k].shape:
+                result[k] = v
+        return result
+
+# def intersect_dicts(da, db, exclude=()):
+#     """Returns intersection of `da` and `db` dicts with matching keys and shapes, excluding `exclude` keys; uses `da`
+#     values.
+#     """
+#     return {k: v for k, v in da.items() if k in db and all(x not in k for x in exclude) and v.shape == db[k].shape}
 
 
 def get_default_args(func):

@@ -173,6 +173,8 @@ def create_dataloader(
     prefix="",
     shuffle=False,
     seed=0,
+    channels=3,
+    rect_size=None,
 ):
     if rect and shuffle:
         LOGGER.warning("WARNING ⚠️ --rect is incompatible with DataLoader shuffle, setting shuffle=False")
@@ -192,6 +194,8 @@ def create_dataloader(
             image_weights=image_weights,
             prefix=prefix,
             rank=rank,
+            channels=channels,
+            rect_size=rect_size,
         )
 
     batch_size = min(batch_size, len(dataset))
@@ -317,7 +321,7 @@ class LoadScreenshots:
 class LoadImages:
     """YOLOv5 image/video dataloader, i.e. `python detect.py --source image.jpg/vid.mp4`"""
 
-    def __init__(self, path, img_size=640, stride=32, auto=True, transforms=None, vid_stride=1):
+    def __init__(self, path, img_size=640, stride=32, auto=True, transforms=None, vid_stride=1, channels=3):
         """Initializes YOLOv5 loader for images/videos, supporting glob patterns, directories, and lists of paths."""
         if isinstance(path, str) and Path(path).suffix == ".txt":  # *.txt file with img/vid/dir on each line
             path = Path(path).read_text().rsplit()
@@ -346,6 +350,7 @@ class LoadImages:
         self.auto = auto
         self.transforms = transforms  # optional
         self.vid_stride = vid_stride  # video frame-rate stride
+        self.channels = channels
         if any(videos):
             self._new_video(videos[0])  # new video
         else:
@@ -396,7 +401,10 @@ class LoadImages:
             im = self.transforms(im0)  # transforms
         else:
             im = letterbox(im0, self.img_size, stride=self.stride, auto=self.auto)[0]  # padded resize
-            im = im.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
+            if self.channels == 3:
+                im = im.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
+            else:
+                im = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)[np.newaxis, :, :]
             im = np.ascontiguousarray(im)  # contiguous
 
         return path, im, im0, self.cap, s
@@ -428,7 +436,7 @@ class LoadImages:
 
 class LoadStreams:
     # YOLOv5 streamloader, i.e. `python detect.py --source 'rtsp://example.com/media.mp4'  # RTSP, RTMP, HTTP streams`
-    def __init__(self, sources="file.streams", img_size=640, stride=32, auto=True, transforms=None, vid_stride=1):
+    def __init__(self, sources="file.streams", img_size=640, stride=32, auto=True, transforms=None, vid_stride=1, channels=3):
         """Initializes a stream loader for processing video streams with YOLOv5, supporting various sources including
         YouTube.
         """
@@ -437,6 +445,7 @@ class LoadStreams:
         self.img_size = img_size
         self.stride = stride
         self.vid_stride = vid_stride  # video frame-rate stride
+        self.channels = channels
         sources = Path(sources).read_text().rsplit() if os.path.isfile(sources) else [sources]
         n = len(sources)
         self.sources = [clean_str(x) for x in sources]  # clean source names for later
@@ -510,8 +519,13 @@ class LoadStreams:
         if self.transforms:
             im = np.stack([self.transforms(x) for x in im0])  # transforms
         else:
-            im = np.stack([letterbox(x, self.img_size, stride=self.stride, auto=self.auto)[0] for x in im0])  # resize
-            im = im[..., ::-1].transpose((0, 3, 1, 2))  # BGR to RGB, BHWC to BCHW
+            im = [letterbox(x, self.img_size, stride=self.stride, auto=self.auto)[0] for x in im0]
+            if self.channels == 3:
+                im = np.stack(im)
+                im = im[..., ::-1].transpose((0, 3, 1, 2))  # BGR to RGB, BHWC to BCHW
+            else:
+                im = [cv2.cvtColor(im_, cv2.COLOR_BGR2GRAY) for im_ in im]
+                im = np.stack(im)
             im = np.ascontiguousarray(im)  # contiguous
 
         return self.sources, im, im0, None, ""
@@ -551,6 +565,8 @@ class LoadImagesAndLabels(Dataset):
         prefix="",
         rank=-1,
         seed=0,
+        channels=3,
+        rect_size=None,
     ):
         self.img_size = img_size
         self.augment = augment
@@ -562,6 +578,7 @@ class LoadImagesAndLabels(Dataset):
         self.stride = stride
         self.path = path
         self.albumentations = Albumentations(size=img_size) if augment else None
+        self.channels = channels
 
         try:
             f = []  # image files
@@ -650,27 +667,30 @@ class LoadImagesAndLabels(Dataset):
         # Rectangular Training
         if self.rect:
             # Sort by aspect ratio
-            s = self.shapes  # wh
-            ar = s[:, 1] / s[:, 0]  # aspect ratio
-            irect = ar.argsort()
-            self.im_files = [self.im_files[i] for i in irect]
-            self.label_files = [self.label_files[i] for i in irect]
-            self.labels = [self.labels[i] for i in irect]
-            self.segments = [self.segments[i] for i in irect]
-            self.shapes = s[irect]  # wh
-            ar = ar[irect]
+            if rect_size is not None:
+                self.batch_shapes = np.array([rect_size] * nb).astype(np.int)
+            else:
+                s = self.shapes  # wh
+                ar = s[:, 1] / s[:, 0]  # aspect ratio
+                irect = ar.argsort()
+                self.im_files = [self.im_files[i] for i in irect]
+                self.label_files = [self.label_files[i] for i in irect]
+                self.labels = [self.labels[i] for i in irect]
+                self.segments = [self.segments[i] for i in irect]
+                self.shapes = s[irect]  # wh
+                ar = ar[irect]
 
-            # Set training image shapes
-            shapes = [[1, 1]] * nb
-            for i in range(nb):
-                ari = ar[bi == i]
-                mini, maxi = ari.min(), ari.max()
-                if maxi < 1:
-                    shapes[i] = [maxi, 1]
-                elif mini > 1:
-                    shapes[i] = [1, 1 / mini]
+                # Set training image shapes
+                shapes = [[1, 1]] * nb
+                for i in range(nb):
+                    ari = ar[bi == i]
+                    mini, maxi = ari.min(), ari.max()
+                    if maxi < 1:
+                        shapes[i] = [maxi, 1]
+                    elif mini > 1:
+                        shapes[i] = [1, 1 / mini]
 
-            self.batch_shapes = np.ceil(np.array(shapes) * img_size / stride + pad).astype(int) * stride
+                self.batch_shapes = np.ceil(np.array(shapes) * img_size / stride + pad).astype(int) * stride
 
         # Cache images into RAM/disk for faster training
         if cache_images == "ram" and not self.check_cache_ram(prefix=prefix):
@@ -833,10 +853,16 @@ class LoadImagesAndLabels(Dataset):
             labels_out[:, 1:] = torch.from_numpy(labels)
 
         # Convert
-        img = img.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
-        img = np.ascontiguousarray(img)
+        if self.channels == 3:
+            img = img.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
+            img = np.ascontiguousarray(img)
+            img = torch.from_numpy(img)
+        else:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            img = np.ascontiguousarray(img)
+            img = torch.from_numpy(img).unsqueeze(0)
 
-        return torch.from_numpy(img), labels_out, self.im_files[index], shapes
+        return img, labels_out, self.im_files[index], shapes
 
     def load_image(self, i):
         """
